@@ -24,8 +24,10 @@
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/zhuoyi0918/wgr/main/wgr.sh) line init
-# 可选参数：--endpoint 域名或IP  --port 443  --sni www.microsoft.com  --wg-port 51820
+# 可选参数：--endpoint 域名或IP  --port 443  --sni www.microsoft.com  --wg-port 51820  --no-direct
 ```
+
+装完会直接给出一个 `direct` 用户的链接。这个用户**不经过落地**，出口就是线路机本机 IP，所以只部署线路机也能当一台独立的 VLESS+REALITY+XHTTP 节点用。不想要这个用户就加 `--no-direct`。
 
 本机的 ufw 或 firewalld 会被自动放行；云厂商的安全组则需要你手动放行 `443/tcp` 和脚本输出的 WG 端口（`udp`）。
 
@@ -52,7 +54,8 @@ bash <(curl -fsSL https://raw.githubusercontent.com/zhuoyi0918/wgr/main/wgr.sh) 
 | 再加一台落地 | 线路机 `wgr line add-land att2`，然后在新落地机上运行输出的命令 |
 | 再加一台线路机 | 新线路机 `wgr line init` → `wgr line add-land <名>`，然后在**已有的**落地机上运行 join 命令（会新建一个接口，原有隧道不受影响） |
 | 一个落地给多个用户 | `wgr line add-user alice att1` |
-| 用户换落地 | `wgr line move-user alice att2`（客户端链接不变） |
+| 加一个线路机直出用户 | `wgr line add-user bob`（不写落地即为 `direct`） |
+| 用户换出口 | `wgr line move-user alice att2`，或 `wgr line move-user alice direct`（客户端链接都不变） |
 | 下线落地 | 线路机 `wgr line del-land att1`，落地机 `wgr land leave <线路机ID>` |
 | 重新打印 join 命令 / 全部链接 | `wgr line join-cmd att1` / `wgr line links` |
 | 查看状态 | `wgr status`（线路机这边会显示每个落地的握手时间和 SS 连通性） |

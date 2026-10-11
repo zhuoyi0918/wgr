@@ -216,14 +216,16 @@ line_render() {
         },
         sniffing: {enabled: true, destOverride: ["http", "tls", "quic"], routeOnly: true}
       }],
-      outbounds: ([{tag: "block", protocol: "blackhole"}] + [.lands[] | {
+      outbounds: ([{tag: "block", protocol: "blackhole"}, {tag: "direct", protocol: "freedom"}] + [.lands[] | {
         tag: ("land-" + .name), protocol: "shadowsocks",
         settings: {servers: [{address: ($s.subnet + "." + (.n|tostring)), port: $sp, method: $m, password: .ss}]}
       }]),
-      routing: {rules: [.lands[] | .name as $ln
+      routing: {rules: ([.lands[] | .name as $ln
         | ([$s.users[] | select(.land == $ln) | .name]) as $u
         | select($u | length > 0)
-        | {type: "field", user: $u, outboundTag: ("land-" + $ln)}]}
+        | {type: "field", user: $u, outboundTag: ("land-" + $ln)}]
+        + ([.users[] | select(.land == "direct") | .name] as $d
+           | if ($d | length) > 0 then [{type: "field", user: $d, outboundTag: "direct"}] else [] end))}
     }' <<<"$s")
   apply_xray wgr-line "$WGR_DIR/line-xray.json" "$cfg"
 }
@@ -248,13 +250,14 @@ line_joincmd() { # $1=land
 
 line_init() {
   [ -f "$LINE_STATE" ] && die "本机已是线路机（$LINE_STATE）。重装请先：wgr uninstall line"
-  local endpoint="" port=443 sni=www.microsoft.com wg_port=""
+  local endpoint="" port=443 sni=www.microsoft.com wg_port="" direct=1
   while [ $# -gt 0 ]; do
     case "$1" in
       --endpoint) endpoint=$2; shift 2 ;;
       --port)     port=$2; shift 2 ;;
       --sni)      sni=$2; shift 2 ;;
       --wg-port)  wg_port=$2; shift 2 ;;
+      --no-direct) direct=0; shift ;;
       *) die "未知参数：$1" ;;
     esac
   done
@@ -284,6 +287,9 @@ line_init() {
     '{id:$id, endpoint:$ep, port:$port, sni:$sni, path:$path, sid:$sid, reality_priv:$rpriv, reality_pub:$rpub,
       wg_port:$wp, subnet:$sn, wg_priv:$wpriv, wg_pub:$wpub, lands:[], users:[]}' >"$LINE_STATE"
   chmod 600 "$LINE_STATE"
+  if [ "$direct" = 1 ]; then
+    jset "$LINE_STATE" --arg id "$("$XRAY" uuid)" '.users += [{name:"direct", uuid:$id, land:"direct"}]'
+  fi
 
   write_unit wgr-line "$WGR_DIR/line-xray.json"
   line_render
@@ -292,12 +298,16 @@ line_init() {
   hr
   info "线路机初始化完成  ID=$(jq -r .id "$LINE_STATE")  入口=$endpoint:$port/tcp  WG=$wg_port/udp"
   warn "云厂商安全组请放行：$port/tcp、$wg_port/udp"
-  echo "下一步：wgr line add-land <落地名>"
+  if [ "$direct" = 1 ]; then
+    echo; echo "▶ 线路机直出链接（不经落地，出口为本机 IP，现在即可使用）："; echo; line_link direct; echo
+  fi
+  echo "需要家宽落地时：wgr line add-land <落地名>"
 }
 
 line_add_land() {
   [ -f "$LINE_STATE" ] || die "本机还不是线路机，先 wgr line init"
   local name=${1:-}; [ -n "$name" ] || die "用法：wgr line add-land <落地名>"; valid_name "$name"
+  [ "$name" = direct ] && die "direct 是保留名（线路机直出），请换一个落地名"
   jq -e --arg n "$name" '.lands[] | select(.name == $n)' "$LINE_STATE" >/dev/null && die "落地 $name 已存在"
   local n; n=$(jq '[.lands[].n] | (max // 1) + 1' "$LINE_STATE")
   [ "$n" -le 254 ] || die "落地数量已满"
@@ -324,21 +334,25 @@ line_del_land() {
   info "已删除落地 $name 及其用户。落地机上执行：wgr land leave $(jq -r .id "$LINE_STATE")"
 }
 
+land_ok() { # 落地名存在，或为 direct（线路机本机直出）
+  [ "$1" = direct ] && return 0
+  jq -e --arg n "$1" '.lands[] | select(.name == $n)' "$LINE_STATE" >/dev/null || die "落地不存在：$1（线路机直出用 direct）"
+}
+
 line_add_user() {
-  local u=${1:-} l=${2:-}; [ -n "$u" ] && [ -n "$l" ] || die "用法：wgr line add-user <用户名> <落地名>"
-  valid_name "$u"
-  jq -e --arg n "$l" '.lands[] | select(.name == $n)' "$LINE_STATE" >/dev/null || die "落地不存在：$l"
+  local u=${1:-} l=${2:-direct}; [ -n "$u" ] || die "用法：wgr line add-user <用户名> [落地名|direct]"
+  valid_name "$u"; land_ok "$l"
   jq -e --arg n "$u" '.users[] | select(.name == $n)' "$LINE_STATE" >/dev/null && die "用户已存在：$u"
   jset "$LINE_STATE" --arg u "$u" --arg l "$l" --arg id "$("$XRAY" uuid)" '.users += [{name:$u, uuid:$id, land:$l}]'
   line_render; info "已添加用户 $u → $l"; line_link "$u"
 }
 
 line_move_user() {
-  local u=${1:-} l=${2:-}; [ -n "$u" ] && [ -n "$l" ] || die "用法：wgr line move-user <用户名> <落地名>"
-  jq -e --arg n "$l" '.lands[] | select(.name == $n)' "$LINE_STATE" >/dev/null || die "落地不存在：$l"
+  local u=${1:-} l=${2:-}; [ -n "$u" ] && [ -n "$l" ] || die "用法：wgr line move-user <用户名> <落地名|direct>"
+  land_ok "$l"
   jq -e --arg n "$u" '.users[] | select(.name == $n)' "$LINE_STATE" >/dev/null || die "用户不存在：$u"
   jset "$LINE_STATE" --arg u "$u" --arg l "$l" '.users |= map(if .name == $u then .land = $l else . end)'
-  line_render; info "用户 $u 已改走落地 $l（链接不变）"
+  line_render; info "用户 $u 已改走 $l（链接不变）"
 }
 
 line_del_user() {
@@ -366,6 +380,9 @@ line_status() {
     printf "%-16s %-16s %-12s %-6s %s\n" "$name" "$ip" "$age" "$ssok" "$users"
   done < <(jq -r '.subnet as $sn | . as $s | .lands[] | .name as $ln
              | [.name, "\($sn).\(.n)", .pub, ([$s.users[] | select(.land == $ln) | .name] | join(","))] | @tsv' <<<"$s")
+  local d; d=$(jq -r '[.users[] | select(.land == "direct") | .name] | join(",")' <<<"$s")
+  [ -n "$d" ] && printf "%-16s %-16s %-12s %-6s %s\n" "direct(本机)" "-" "-" "-" "$d"
+  return 0
 }
 
 # ================================================================ 落地机 land
@@ -551,12 +568,13 @@ usage() {
 wgr — WireGuard 反向隧道（线路机 VLESS+REALITY+XHTTP 入口 / 落地机 SS-2022 出口）
 
 线路机：
-  wgr line init [--endpoint 域名或IP] [--port 443] [--sni www.microsoft.com] [--wg-port 51820]
+  wgr line init [--endpoint 域名或IP] [--port 443] [--sni www.microsoft.com] [--wg-port 51820] [--no-direct]
+                                      默认附带一个直出用户 direct（出口=线路机本机）
   wgr line add-land <落地名>          新增落地，输出落地机部署命令 + 客户端链接
   wgr line del-land <落地名>
   wgr line join-cmd <落地名>          重新打印落地机部署命令
-  wgr line add-user <用户> <落地名>   同一落地加多个用户
-  wgr line move-user <用户> <落地名>  用户改走另一个落地（链接不变）
+  wgr line add-user <用户> [落地名|direct]   加用户；不写落地即线路机直出
+  wgr line move-user <用户> <落地名|direct>  用户切换出口（链接不变）
   wgr line del-user <用户>
   wgr line links                      打印全部客户端链接
 落地机：

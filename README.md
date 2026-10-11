@@ -10,6 +10,12 @@
 - 落地机**零公网入站**：不吃 AT&T BGW 的入站新建连接预算，出口 IP 变了也会自动重连（WG roaming + watchdog）
 - **多线路 × 多落地**：一台线路机可以挂多台落地机；一台落地机也可以同时对接多台线路机（每台线路机一个独立的 `wgr-<ID>` 接口，内网段随机，互不冲突）
 - 和机器上已有的 xray / wireguard **互不干扰**：独立的二进制 `/usr/local/lib/wgr/xray`、状态目录 `/etc/wgr`，服务名为 `wgr-line` / `wgr-land`
+- **自动放行防火墙**：检测到 ufw 就自动放行（ufw 没启用时也会预先写好规则，启用后即生效，脚本不会替你启用 ufw）；检测到 firewalld 也会自动处理。具体放行哪些端口：
+  - 线路机：所选的入口端口（tcp）和 WG 端口（udp）
+  - 落地机：只在 `wgr-<ID>` 隧道接口上放行 SS 端口，公网方向依旧零入站
+  - 卸载、`land leave` 时会把这些规则一起删掉
+
+  云厂商的安全组脚本改不到，需要你到控制台手动放行。
 - 支持 Debian/Ubuntu（apt）、RHEL 系（dnf/yum）；要求 KVM，或内核 ≥ 5.6 自带 WireGuard
 
 ## 快速开始
@@ -21,7 +27,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/zhuoyi0918/wgr/main/wgr.sh) 
 # 可选参数：--endpoint 域名或IP  --port 443  --sni www.microsoft.com  --wg-port 51820
 ```
 
-云厂商的安全组需要放行 `443/tcp` 和脚本输出的 WG 端口（`udp`）。
+本机的 ufw 或 firewalld 会被自动放行；云厂商的安全组则需要你手动放行 `443/tcp` 和脚本输出的 WG 端口（`udp`）。
 
 **2. 在线路机上添加落地**
 

@@ -132,19 +132,43 @@ pub_ip() {
     || curl -4 -fsS --max-time 6 https://ip.sb 2>/dev/null || true
 }
 
-fw_open() { # $1=port $2=tcp|udp
-  if command -v ufw >/dev/null && ufw status 2>/dev/null | grep -q "Status: active"; then
-    ufw allow "$1/$2" >/dev/null
-  elif command -v firewall-cmd >/dev/null && firewall-cmd --state >/dev/null 2>&1; then
-    firewall-cmd -q --permanent --add-port="$1/$2" && firewall-cmd -q --reload
-  fi
+# 防火墙：只要装了 ufw 就加规则（未启用时预先写入，启用后自动生效；不会替你启用 ufw）
+ufw_rule() { # $1=port $2=tcp|udp [$3=接口]  → 输出 ufw 规则参数
+  if [ -n "${3:-}" ]; then echo "in on $3 to any port $1 proto $2"; else echo "$1/$2"; fi
 }
-fw_close() {
-  if command -v ufw >/dev/null && ufw status 2>/dev/null | grep -q "Status: active"; then
-    ufw delete allow "$1/$2" >/dev/null 2>&1 || true
+fw_open() { # $1=port $2=tcp|udp [$3=只放行该接口]
+  local desc="$1/$2${3:+ (仅 $3)}"
+  if command -v ufw >/dev/null; then
+    # shellcheck disable=SC2046
+    ufw allow $(ufw_rule "$@") comment wgr >/dev/null || { warn "ufw 放行 $desc 失败，请手动处理"; return 0; }
+    if ufw status 2>/dev/null | grep -qw active; then
+      info "ufw 已放行 $desc"
+    else
+      info "检测到 ufw（未启用），已预先添加放行规则 $desc，启用后生效"
+    fi
   elif command -v firewall-cmd >/dev/null && firewall-cmd --state >/dev/null 2>&1; then
-    firewall-cmd -q --permanent --remove-port="$1/$2" 2>/dev/null && firewall-cmd -q --reload || true
+    if [ -n "${3:-}" ]; then
+      firewall-cmd -q --permanent --zone=trusted --add-interface="$3"
+    else
+      firewall-cmd -q --permanent --add-port="$1/$2"
+    fi
+    firewall-cmd -q --reload && info "firewalld 已放行 $desc"
   fi
+  return 0
+}
+fw_close() { # 参数同 fw_open
+  if command -v ufw >/dev/null; then
+    # shellcheck disable=SC2046
+    ufw delete allow $(ufw_rule "$@") >/dev/null 2>&1 || true
+  elif command -v firewall-cmd >/dev/null && firewall-cmd --state >/dev/null 2>&1; then
+    if [ -n "${3:-}" ]; then
+      firewall-cmd -q --permanent --zone=trusted --remove-interface="$3" 2>/dev/null || true
+    else
+      firewall-cmd -q --permanent --remove-port="$1/$2" 2>/dev/null || true
+    fi
+    firewall-cmd -q --reload || true
+  fi
+  return 0
 }
 
 wg_up_or_sync() { # $1=接口
@@ -426,6 +450,10 @@ land_join() {
   systemctl restart "wg-quick@$iface" 2>/dev/null || true
   systemctl enable --now "wg-quick@$iface" >/dev/null 2>&1 || { journalctl -u "wg-quick@$iface" -n 20 --no-pager; die "wg-quick@$iface 启动失败"; }
 
+  # 本机若有 ufw/firewalld：只在隧道接口上放行 SS 端口（公网仍然零入站）
+  fw_open "$(jq -r .ss_port <<<"$t")" tcp "$iface"
+  fw_open "$(jq -r .ss_port <<<"$t")" udp "$iface"
+
   write_unit wgr-land "$WGR_DIR/land-xray.json"
   land_render
   land_install_watchdog
@@ -447,6 +475,7 @@ land_leave() {
   jq -e --arg l "$lid" '.tunnels[] | select(.line_id == $l)' "$LAND_STATE" >/dev/null || die "没有到 $lid 的隧道"
   systemctl disable --now "wg-quick@wgr-$lid" >/dev/null 2>&1 || true
   rm -f "/etc/wireguard/wgr-$lid.conf"
+  fw_close "$SS_PORT" tcp "wgr-$lid"; fw_close "$SS_PORT" udp "wgr-$lid"
   jset "$LAND_STATE" --arg l "$lid" '.tunnels |= map(select(.line_id != $l))'
   land_render
   info "已移除到线路机 $lid 的隧道"
@@ -495,6 +524,7 @@ uninstall() {
     if [ -f "$LAND_STATE" ]; then
       local lid; for lid in $(jq -r '.tunnels[].line_id' "$LAND_STATE"); do
         systemctl disable --now "wg-quick@wgr-$lid" >/dev/null 2>&1 || true; rm -f "/etc/wireguard/wgr-$lid.conf"
+        fw_close "$SS_PORT" tcp "wgr-$lid"; fw_close "$SS_PORT" udp "wgr-$lid"
       done
     fi
     systemctl disable --now wgr-land wgr-watchdog.timer >/dev/null 2>&1 || true
